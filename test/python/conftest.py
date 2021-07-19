@@ -3,9 +3,7 @@ import sys
 from pathlib import Path
 
 import psycopg2
-import psycopg2.extras
 import pytest
-import tempfile
 
 SRC_DIR = Path(__file__) / '..' / '..' / '..'
 
@@ -15,38 +13,12 @@ sys.path.insert(0, str(SRC_DIR.resolve()))
 from nominatim.config import Configuration
 from nominatim.db import connection
 from nominatim.db.sql_preprocessor import SQLPreprocessor
+import nominatim.tokenizer.factory
+import nominatim.cli
 
-class _TestingCursor(psycopg2.extras.DictCursor):
-    """ Extension to the DictCursor class that provides execution
-        short-cuts that simplify writing assertions.
-    """
-
-    def scalar(self, sql, params=None):
-        """ Execute a query with a single return value and return this value.
-            Raises an assertion when not exactly one row is returned.
-        """
-        self.execute(sql, params)
-        assert self.rowcount == 1
-        return self.fetchone()[0]
-
-    def row_set(self, sql, params=None):
-        """ Execute a query and return the result as a set of tuples.
-        """
-        self.execute(sql, params)
-
-        return set((tuple(row) for row in self))
-
-    def table_exists(self, table):
-        """ Check that a table with the given name exists in the database.
-        """
-        num = self.scalar("""SELECT count(*) FROM pg_tables
-                             WHERE tablename = %s""", (table, ))
-        return num == 1
-
-    def table_rows(self, table):
-        """ Return the number of rows in the given table.
-        """
-        return self.scalar('SELECT count(*) FROM ' + table)
+import dummy_tokenizer
+import mocks
+from cursor import CursorForTesting
 
 
 @pytest.fixture
@@ -64,7 +36,7 @@ def temp_db(monkeypatch):
 
     conn.close()
 
-    monkeypatch.setenv('NOMINATIM_DATABASE_DSN' , 'dbname=' + name)
+    monkeypatch.setenv('NOMINATIM_DATABASE_DSN', 'dbname=' + name)
 
     yield name
 
@@ -107,19 +79,20 @@ def temp_db_cursor(temp_db):
     """
     conn = psycopg2.connect('dbname=' + temp_db)
     conn.set_isolation_level(0)
-    with conn.cursor(cursor_factory=_TestingCursor) as cur:
+    with conn.cursor(cursor_factory=CursorForTesting) as cur:
         yield cur
     conn.close()
 
 
 @pytest.fixture
 def table_factory(temp_db_cursor):
+    """ A fixture that creates new SQL tables, potentially filled with
+        content.
+    """
     def mk_table(name, definition='id INT', content=None):
         temp_db_cursor.execute('CREATE TABLE {} ({})'.format(name, definition))
         if content is not None:
-            if not isinstance(content, str):
-                content = '),('.join([str(x) for x in content])
-            temp_db_cursor.execute("INSERT INTO {} VALUES ({})".format(name, content))
+            temp_db_cursor.execute_values("INSERT INTO {} VALUES %s".format(name), content)
 
     return mk_table
 
@@ -133,55 +106,66 @@ def def_config():
                     data=SRC_DIR / 'data')
     return cfg
 
+
 @pytest.fixture
 def src_dir():
     return SRC_DIR.resolve()
 
-@pytest.fixture
-def tmp_phplib_dir():
-    with tempfile.TemporaryDirectory() as phpdir:
-        (Path(phpdir) / 'admin').mkdir()
-
-        yield Path(phpdir)
 
 @pytest.fixture
-def status_table(temp_db_conn):
+def cli_call():
+    def _call_nominatim(*args):
+        return nominatim.cli.nominatim(module_dir='MODULE NOT AVAILABLE',
+                                       osm2pgsql_path='OSM2PGSQL NOT AVAILABLE',
+                                       phplib_dir=str(SRC_DIR / 'lib-php'),
+                                       data_dir=str(SRC_DIR / 'data'),
+                                       phpcgi_path='/usr/bin/php-cgi',
+                                       sqllib_dir=str(SRC_DIR / 'lib-sql'),
+                                       config_dir=str(SRC_DIR / 'settings'),
+                                       cli_args=args)
+
+    return _call_nominatim
+
+
+@pytest.fixture
+def property_table(table_factory, temp_db_conn):
+    table_factory('nominatim_properties', 'property TEXT, value TEXT')
+
+    return mocks.MockPropertyTable(temp_db_conn)
+
+
+@pytest.fixture
+def status_table(table_factory):
     """ Create an empty version of the status table and
         the status logging table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE import_status (
-                           lastimportdate timestamp with time zone NOT NULL,
-                           sequence_id integer,
-                           indexed boolean
-                       )""")
-        cur.execute("""CREATE TABLE import_osmosis_log (
-                           batchend timestamp,
-                           batchseq integer,
-                           batchsize bigint,
-                           starttime timestamp,
-                           endtime timestamp,
-                           event text
-                           )""")
-    temp_db_conn.commit()
+    table_factory('import_status',
+                  """lastimportdate timestamp with time zone NOT NULL,
+                     sequence_id integer,
+                     indexed boolean""")
+    table_factory('import_osmosis_log',
+                  """batchend timestamp,
+                     batchseq integer,
+                     batchsize bigint,
+                     starttime timestamp,
+                     endtime timestamp,
+                     event text""")
 
 
 @pytest.fixture
-def place_table(temp_db_with_extensions, temp_db_conn):
+def place_table(temp_db_with_extensions, table_factory):
     """ Create an empty version of the place table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE place (
-                           osm_id int8 NOT NULL,
-                           osm_type char(1) NOT NULL,
-                           class text NOT NULL,
-                           type text NOT NULL,
-                           name hstore,
-                           admin_level smallint,
-                           address hstore,
-                           extratags hstore,
-                           geometry Geometry(Geometry,4326) NOT NULL)""")
-    temp_db_conn.commit()
+    table_factory('place',
+                  """osm_id int8 NOT NULL,
+                     osm_type char(1) NOT NULL,
+                     class text NOT NULL,
+                     type text NOT NULL,
+                     name hstore,
+                     admin_level smallint,
+                     address hstore,
+                     extratags hstore,
+                     geometry Geometry(Geometry,4326) NOT NULL""")
 
 
 @pytest.fixture
@@ -189,6 +173,7 @@ def place_row(place_table, temp_db_cursor):
     """ A factory for rows in the place table. The table is created as a
         prerequisite to the fixture.
     """
+    psycopg2.extras.register_hstore(temp_db_cursor)
     idseq = itertools.count(1001)
     def _insert(osm_type='N', osm_id=None, cls='amenity', typ='cafe', names=None,
                 admin_level=None, address=None, extratags=None, geom=None):
@@ -203,69 +188,31 @@ def place_row(place_table, temp_db_cursor):
 def placex_table(temp_db_with_extensions, temp_db_conn):
     """ Create an empty version of the place table.
     """
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE placex (
-                           place_id BIGINT,
-                           parent_place_id BIGINT,
-                           linked_place_id BIGINT,
-                           importance FLOAT,
-                           indexed_date TIMESTAMP,
-                           geometry_sector INTEGER,
-                           rank_address SMALLINT,
-                           rank_search SMALLINT,
-                           partition SMALLINT,
-                           indexed_status SMALLINT,
-                           osm_id int8,
-                           osm_type char(1),
-                           class text,
-                           type text,
-                           name hstore,
-                           admin_level smallint,
-                           address hstore,
-                           extratags hstore,
-                           geometry Geometry(Geometry,4326),
-                           wikipedia TEXT,
-                           country_code varchar(2),
-                           housenumber TEXT,
-                           postcode TEXT,
-                           centroid GEOMETRY(Geometry, 4326))""")
-    temp_db_conn.commit()
+    return mocks.MockPlacexTable(temp_db_conn)
 
 
 @pytest.fixture
-def osmline_table(temp_db_with_extensions, temp_db_conn):
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE location_property_osmline (
-                           place_id BIGINT,
-                           osm_id BIGINT,
-                           parent_place_id BIGINT,
-                           geometry_sector INTEGER,
-                           indexed_date TIMESTAMP,
-                           startnumber INTEGER,
-                           endnumber INTEGER,
-                           partition SMALLINT,
-                           indexed_status SMALLINT,
-                           linegeo GEOMETRY,
-                           interpolationtype TEXT,
-                           address HSTORE,
-                           postcode TEXT,
-                           country_code VARCHAR(2))""")
-    temp_db_conn.commit()
+def osmline_table(temp_db_with_extensions, table_factory):
+    table_factory('location_property_osmline',
+                  """place_id BIGINT,
+                     osm_id BIGINT,
+                     parent_place_id BIGINT,
+                     geometry_sector INTEGER,
+                     indexed_date TIMESTAMP,
+                     startnumber INTEGER,
+                     endnumber INTEGER,
+                     partition SMALLINT,
+                     indexed_status SMALLINT,
+                     linegeo GEOMETRY,
+                     interpolationtype TEXT,
+                     address HSTORE,
+                     postcode TEXT,
+                     country_code VARCHAR(2)""")
 
 
 @pytest.fixture
-def word_table(temp_db, temp_db_conn):
-    with temp_db_conn.cursor() as cur:
-        cur.execute("""CREATE TABLE word (
-                           word_id INTEGER,
-                           word_token text,
-                           word text,
-                           class text,
-                           type text,
-                           country_code varchar(2),
-                           search_name_count INTEGER,
-                           operator TEXT)""")
-    temp_db_conn.commit()
+def word_table(temp_db_conn):
+    return mocks.MockWordTable(temp_db_conn)
 
 
 @pytest.fixture
@@ -280,11 +227,30 @@ def osm2pgsql_options(temp_db):
                                  main_data='', main_index=''))
 
 @pytest.fixture
-def sql_preprocessor(temp_db_conn, tmp_path, monkeypatch, table_factory):
-    monkeypatch.setenv('NOMINATIM_DATABASE_MODULE_PATH', '.')
-    table_factory('country_name', 'partition INT', (0, 1, 2))
+def sql_preprocessor(temp_db_conn, tmp_path, table_factory):
+    table_factory('country_name', 'partition INT', ((0, ), (1, ), (2, )))
     cfg = Configuration(None, SRC_DIR.resolve() / 'settings')
     cfg.set_libdirs(module='.', osm2pgsql='.', php=SRC_DIR / 'lib-php',
                     sql=tmp_path, data=SRC_DIR / 'data')
 
     return SQLPreprocessor(temp_db_conn, cfg)
+
+
+@pytest.fixture
+def tokenizer_mock(monkeypatch, property_table):
+    """ Sets up the configuration so that the test dummy tokenizer will be
+        loaded when the tokenizer factory is used. Also returns a factory
+        with which a new dummy tokenizer may be created.
+    """
+    monkeypatch.setenv('NOMINATIM_TOKENIZER', 'dummy')
+
+    def _import_dummy(*args, **kwargs):
+        return dummy_tokenizer
+
+    monkeypatch.setattr(nominatim.tokenizer.factory, "_import_tokenizer", _import_dummy)
+    property_table.set('tokenizer', 'dummy')
+
+    def _create_tokenizer():
+        return dummy_tokenizer.DummyTokenizer(None, None)
+
+    return _create_tokenizer

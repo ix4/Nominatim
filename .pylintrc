@@ -1,7 +1,7 @@
 [MASTER]
 
 extension-pkg-whitelist=osmium
-ignored-modules=icu
+ignored-modules=icu,datrie
 
 [MESSAGES CONTROL]
 
@@ -10,3 +10,6 @@ ignored-modules=icu
 # closing added here because it sometimes triggers a false positive with
 # 'with' statements.
 ignored-classes=NominatimArgs,closing
+disable=too-few-public-methods,duplicate-code
+
+good-names=i,x,y,fd,db

@@ -7,6 +7,7 @@ from place_inserter import PlaceColumn
 from table_compare import NominatimID, DBRow
 
 from nominatim.indexer import indexer
+from nominatim.tokenizer import factory as tokenizer_factory
 
 def check_database_integrity(context):
     """ Check some generic constraints on the tables.
@@ -86,6 +87,9 @@ def add_data_to_planet_ways(context):
 def import_and_index_data_from_place_table(context):
     """ Import data previously set up in the place table.
     """
+    nctx = context.nominatim
+
+    tokenizer = tokenizer_factory.create_tokenizer(nctx.get_test_config())
     context.nominatim.copy_from_place(context.db)
 
     # XXX use tool function as soon as it is ported
@@ -105,7 +109,7 @@ def import_and_index_data_from_place_table(context):
 
     # Call directly as the refresh function does not include postcodes.
     indexer.LOG.setLevel(logging.ERROR)
-    indexer.Indexer(context.nominatim.get_libpq_dsn(), 1).index_full(analyse=False)
+    indexer.Indexer(context.nominatim.get_libpq_dsn(), tokenizer, 1).index_full(analyse=False)
 
     check_database_integrity(context)
 
@@ -195,44 +199,35 @@ def check_search_name_contents(context, exclude):
         have an identifier of the form '<NRW><osm id>[:<class>]'. All
         expected rows are expected to be present with at least one database row.
     """
-    with context.db.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        for row in context.table:
-            nid = NominatimID(row['object'])
-            nid.row_by_place_id(cur, 'search_name',
-                                ['ST_X(centroid) as cx', 'ST_Y(centroid) as cy'])
-            assert cur.rowcount > 0, "No rows found for " + row['object']
+    tokenizer = tokenizer_factory.get_tokenizer_for_db(context.nominatim.get_test_config())
 
-            for res in cur:
-                db_row = DBRow(nid, res, context)
-                for name, value in zip(row.headings, row.cells):
-                    if name in ('name_vector', 'nameaddress_vector'):
-                        items = [x.strip() for x in value.split(',')]
-                        with context.db.cursor() as subcur:
-                            subcur.execute(""" SELECT word_id, word_token
-                                               FROM word, (SELECT unnest(%s::TEXT[]) as term) t
-                                               WHERE word_token = make_standard_name(t.term)
-                                                     and class is null and country_code is null
-                                                     and operator is null
-                                              UNION
-                                               SELECT word_id, word_token
-                                               FROM word, (SELECT unnest(%s::TEXT[]) as term) t
-                                               WHERE word_token = ' ' || make_standard_name(t.term)
-                                                     and class is null and country_code is null
-                                                     and operator is null
-                                           """,
-                                           (list(filter(lambda x: not x.startswith('#'), items)),
-                                            list(filter(lambda x: x.startswith('#'), items))))
+    with tokenizer.name_analyzer() as analyzer:
+        with context.db.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            for row in context.table:
+                nid = NominatimID(row['object'])
+                nid.row_by_place_id(cur, 'search_name',
+                                    ['ST_X(centroid) as cx', 'ST_Y(centroid) as cy'])
+                assert cur.rowcount > 0, "No rows found for " + row['object']
+
+                for res in cur:
+                    db_row = DBRow(nid, res, context)
+                    for name, value in zip(row.headings, row.cells):
+                        if name in ('name_vector', 'nameaddress_vector'):
+                            items = [x.strip() for x in value.split(',')]
+                            tokens = analyzer.get_word_token_info(items)
+
                             if not exclude:
-                                assert subcur.rowcount >= len(items), \
-                                    "No word entry found for {}. Entries found: {!s}".format(value, subcur.rowcount)
-                            for wid in subcur:
-                                present = wid[0] in res[name]
+                                assert len(tokens) >= len(items), \
+                                       "No word entry found for {}. Entries found: {!s}".format(value, len(tokens))
+                            for word, token, wid in tokens:
                                 if exclude:
-                                    assert not present, "Found term for {}/{}: {}".format(row['object'], name, wid[1])
+                                    assert wid not in res[name], \
+                                           "Found term for {}/{}: {}".format(nid, name, wid)
                                 else:
-                                    assert present, "Missing term for {}/{}: {}".fromat(row['object'], name, wid[1])
-                    elif name != 'object':
-                        assert db_row.contains(name, value), db_row.assert_msg(name, value)
+                                    assert wid in res[name], \
+                                           "Missing term for {}/{}: {}".format(nid, name, wid)
+                        elif name != 'object':
+                            assert db_row.contains(name, value), db_row.assert_msg(name, value)
 
 @then("search_name has no entry for (?P<oid>.*)")
 def check_search_name_has_entry(context, oid):
@@ -256,7 +251,7 @@ def check_location_postcode(context):
     with context.db.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
         cur.execute("SELECT *, ST_AsText(geometry) as geomtxt FROM location_postcode")
         assert cur.rowcount == len(list(context.table)), \
-            "Postcode table has {} rows, expected {}.".foramt(cur.rowcount, len(list(context.table)))
+            "Postcode table has {} rows, expected {}.".format(cur.rowcount, len(list(context.table)))
 
         results = {}
         for row in cur:

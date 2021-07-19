@@ -7,6 +7,7 @@ require_once(CONST_LibDir.'/TokenHousenumber.php');
 require_once(CONST_LibDir.'/TokenPostcode.php');
 require_once(CONST_LibDir.'/TokenSpecialTerm.php');
 require_once(CONST_LibDir.'/TokenWord.php');
+require_once(CONST_LibDir.'/TokenPartial.php');
 require_once(CONST_LibDir.'/SpecialSearchOperator.php');
 
 /**
@@ -17,15 +18,6 @@ require_once(CONST_LibDir.'/SpecialSearchOperator.php');
  * tokens do not have a common base class. All tokens need to have a field
  * with the word id that points to an entry in the `word` database table
  * but otherwise the information saved about a token can be very different.
- *
- * There are two different kinds of token words: full words and partial terms.
- *
- * Full words start with a space. They represent a complete name of a place.
- * All special tokens are normally full words.
- *
- * Partial terms have no space at the beginning. They may represent a part of
- * a name of a place (e.g. in the name 'World Trade Center' a partial term
- * would be 'Trade' or 'Trade Center'). They are only used in TokenWord.
  */
 class TokenList
 {
@@ -64,7 +56,7 @@ class TokenList
      */
     public function containsAny($sWord)
     {
-        return isset($this->aTokens[$sWord]) || isset($this->aTokens[' '.$sWord]);
+        return isset($this->aTokens[$sWord]);
     }
 
     /**
@@ -86,95 +78,13 @@ class TokenList
 
         foreach ($this->aTokens as $aTokenList) {
             foreach ($aTokenList as $oToken) {
-                if (is_a($oToken, '\Nominatim\Token\Word') && !$oToken->bPartial) {
-                    $ids[$oToken->iId] = $oToken->iId;
+                if (is_a($oToken, '\Nominatim\Token\Word')) {
+                    $ids[$oToken->getId()] = $oToken->getId();
                 }
             }
         }
 
         return $ids;
-    }
-
-    /**
-     * Add token information from the word table in the database.
-     *
-     * @param object   $oDB           Nominatim::DB instance.
-     * @param string[] $aTokens       List of tokens to look up in the database.
-     * @param string[] $aCountryCodes List of country restrictions.
-     * @param string   $sNormQuery    Normalized query string.
-     * @param object   $oNormalizer   Normalizer function to use on tokens.
-     *
-     * @return void
-     */
-    public function addTokensFromDB(&$oDB, &$aTokens, &$aCountryCodes, $sNormQuery, $oNormalizer)
-    {
-        // Check which tokens we have, get the ID numbers
-        $sSQL = 'SELECT word_id, word_token, word, class, type, country_code,';
-        $sSQL .= ' operator, coalesce(search_name_count, 0) as count';
-        $sSQL .= ' FROM word WHERE word_token in (';
-        $sSQL .= join(',', $oDB->getDBQuotedList($aTokens)).')';
-
-        Debug::printSQL($sSQL);
-
-        $aDBWords = $oDB->getAll($sSQL, null, 'Could not get word tokens.');
-
-        foreach ($aDBWords as $aWord) {
-            $oToken = null;
-            $iId = (int) $aWord['word_id'];
-
-            if ($aWord['class']) {
-                // Special terms need to appear in their normalized form.
-                if ($aWord['word']) {
-                    $sNormWord = $aWord['word'];
-                    if ($oNormalizer != null) {
-                        $sNormWord = $oNormalizer->transliterate($aWord['word']);
-                    }
-                    if (strpos($sNormQuery, $sNormWord) === false) {
-                        continue;
-                    }
-                }
-
-                if ($aWord['class'] == 'place' && $aWord['type'] == 'house') {
-                    $oToken = new Token\HouseNumber($iId, trim($aWord['word_token']));
-                } elseif ($aWord['class'] == 'place' && $aWord['type'] == 'postcode') {
-                    if ($aWord['word']
-                        && pg_escape_string($aWord['word']) == $aWord['word']
-                    ) {
-                        $oToken = new Token\Postcode(
-                            $iId,
-                            $aWord['word'],
-                            $aWord['country_code']
-                        );
-                    }
-                } else {
-                    // near and in operator the same at the moment
-                    $oToken = new Token\SpecialTerm(
-                        $iId,
-                        $aWord['class'],
-                        $aWord['type'],
-                        $aWord['operator'] ? Operator::NEAR : Operator::NONE
-                    );
-                }
-            } elseif ($aWord['country_code']) {
-                // Filter country tokens that do not match restricted countries.
-                if (!$aCountryCodes
-                    || in_array($aWord['country_code'], $aCountryCodes)
-                ) {
-                    $oToken = new Token\Country($iId, $aWord['country_code']);
-                }
-            } else {
-                $oToken = new Token\Word(
-                    $iId,
-                    $aWord['word_token'][0] != ' ',
-                    (int) $aWord['count'],
-                    substr_count($aWord['word_token'], ' ')
-                );
-            }
-
-            if ($oToken) {
-                $this->addToken($aWord['word_token'], $oToken);
-            }
-        }
     }
 
     /**
@@ -199,9 +109,9 @@ class TokenList
         $aWordsIDs = array();
         foreach ($this->aTokens as $sToken => $aWords) {
             foreach ($aWords as $aToken) {
-                if ($aToken->iId !== null) {
-                    $aWordsIDs[$aToken->iId] =
-                        '#'.$sToken.'('.$aToken->iId.')#';
+                $iId = $aToken->getId();
+                if ($iId !== null) {
+                    $aWordsIDs[$iId] = '#'.$sToken.'('.$aToken->debugCode().' '.$iId.')#';
                 }
             }
         }

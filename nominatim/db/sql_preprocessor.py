@@ -41,30 +41,16 @@ def _setup_tablespace_sql(config):
     return out
 
 
-def _setup_postgres_sql(conn):
-    """ Set up a dictionary with various Postgresql/Postgis SQL terms which
-        are dependent on the database version in use.
-    """
-    out = {}
-    pg_version = conn.server_version_tuple()
-    # CREATE INDEX IF NOT EXISTS was introduced in PG9.5.
-    # Note that you need to ignore failures on older versions when
-    # using this construct.
-    out['if_index_not_exists'] = ' IF NOT EXISTS ' if pg_version >= (9, 5, 0) else ''
-
-    return out
-
-
 def _setup_postgresql_features(conn):
     """ Set up a dictionary with various optional Postgresql/Postgis features that
         depend on the database version.
     """
     pg_version = conn.server_version_tuple()
     return {
-        'has_index_non_key_column' : pg_version >= (11, 0, 0)
+        'has_index_non_key_column': pg_version >= (11, 0, 0)
     }
 
-class SQLPreprocessor: # pylint: disable=too-few-public-methods
+class SQLPreprocessor:
     """ A environment for preprocessing SQL files from the
         lib-sql directory.
 
@@ -87,10 +73,7 @@ class SQLPreprocessor: # pylint: disable=too-few-public-methods
 
         self.env.globals['config'] = config
         self.env.globals['db'] = db_info
-        self.env.globals['sql'] = _setup_postgres_sql(conn)
         self.env.globals['postgres'] = _setup_postgresql_features(conn)
-        self.env.globals['modulepath'] = config.DATABASE_MODULE_PATH or \
-                                         str((config.project_dir / 'module').resolve())
 
 
     def run_sql_file(self, conn, name, **kwargs):

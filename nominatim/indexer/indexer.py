@@ -2,76 +2,82 @@
 Main work horse for indexing (computing addresses) the database.
 """
 import logging
-import select
+import time
+
+import psycopg2.extras
 
 from nominatim.indexer.progress import ProgressLogger
 from nominatim.indexer import runners
-from nominatim.db.async_connection import DBConnection
+from nominatim.db.async_connection import DBConnection, WorkerPool
 from nominatim.db.connection import connect
 
 LOG = logging.getLogger()
 
-class WorkerPool:
-    """ A pool of asynchronous database connections.
 
-        The pool may be used as a context manager.
+class PlaceFetcher:
+    """ Asynchronous connection that fetches place details for processing.
     """
-    REOPEN_CONNECTIONS_AFTER = 100000
+    def __init__(self, dsn, setup_conn):
+        self.wait_time = 0
+        self.current_ids = None
+        self.conn = DBConnection(dsn, cursor_factory=psycopg2.extras.DictCursor)
 
-    def __init__(self, dsn, pool_size):
-        self.threads = [DBConnection(dsn) for _ in range(pool_size)]
-        self.free_workers = self._yield_free_worker()
+        with setup_conn.cursor() as cur:
+            # need to fetch those manually because register_hstore cannot
+            # fetch them on an asynchronous connection below.
+            hstore_oid = cur.scalar("SELECT 'hstore'::regtype::oid")
+            hstore_array_oid = cur.scalar("SELECT 'hstore[]'::regtype::oid")
 
-
-    def finish_all(self):
-        """ Wait for all connection to finish.
-        """
-        for thread in self.threads:
-            while not thread.is_done():
-                thread.wait()
-
-        self.free_workers = self._yield_free_worker()
+        psycopg2.extras.register_hstore(self.conn.conn, oid=hstore_oid,
+                                        array_oid=hstore_array_oid)
 
     def close(self):
-        """ Close all connections and clear the pool.
+        """ Close the underlying asynchronous connection.
         """
-        for thread in self.threads:
-            thread.close()
-        self.threads = []
-        self.free_workers = None
+        if self.conn:
+            self.conn.close()
+            self.conn = None
 
 
-    def next_free_worker(self):
-        """ Get the next free connection.
+    def fetch_next_batch(self, cur, runner):
+        """ Send a request for the next batch of places.
+            If details for the places are required, they will be fetched
+            asynchronously.
+
+            Returns true if there is still data available.
         """
-        return next(self.free_workers)
+        ids = cur.fetchmany(100)
 
+        if not ids:
+            self.current_ids = None
+            return False
 
-    def _yield_free_worker(self):
-        ready = self.threads
-        command_stat = 0
-        while True:
-            for thread in ready:
-                if thread.is_done():
-                    command_stat += 1
-                    yield thread
+        if hasattr(runner, 'get_place_details'):
+            runner.get_place_details(self.conn, ids)
+            self.current_ids = []
+        else:
+            self.current_ids = ids
 
-            if command_stat > self.REOPEN_CONNECTIONS_AFTER:
-                for thread in self.threads:
-                    while not thread.is_done():
-                        thread.wait()
-                    thread.connect()
-                ready = self.threads
-                command_stat = 0
-            else:
-                _, ready, _ = select.select([], self.threads, [])
+        return True
 
+    def get_batch(self):
+        """ Get the next batch of data, previously requested with
+            `fetch_next_batch`.
+        """
+        if self.current_ids is not None and not self.current_ids:
+            tstart = time.time()
+            self.conn.wait()
+            self.wait_time += time.time() - tstart
+            self.current_ids = self.conn.cursor.fetchall()
+
+        return self.current_ids
 
     def __enter__(self):
         return self
 
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self.conn.wait()
         self.close()
 
 
@@ -79,13 +85,14 @@ class Indexer:
     """ Main indexing routine.
     """
 
-    def __init__(self, dsn, num_threads):
+    def __init__(self, dsn, tokenizer, num_threads):
         self.dsn = dsn
+        self.tokenizer = tokenizer
         self.num_threads = num_threads
 
 
     def index_full(self, analyse=True):
-        """ Index the complete database. This will first index boudnaries
+        """ Index the complete database. This will first index boundaries
             followed by all other objects. When `analyse` is True, then the
             database will be analysed at the appropriate places to
             ensure that database statistics are updated.
@@ -93,13 +100,10 @@ class Indexer:
         with connect(self.dsn) as conn:
             conn.autocommit = True
 
-            if analyse:
-                def _analyze():
+            def _analyze():
+                if analyse:
                     with conn.cursor() as cur:
                         cur.execute('ANALYZE')
-            else:
-                def _analyze():
-                    pass
 
             self.index_by_rank(0, 4)
             _analyze()
@@ -123,8 +127,9 @@ class Indexer:
         LOG.warning("Starting indexing boundaries using %s threads",
                     self.num_threads)
 
-        for rank in range(max(minrank, 4), min(maxrank, 26)):
-            self._index(runners.BoundaryRunner(rank))
+        with self.tokenizer.name_analyzer() as analyzer:
+            for rank in range(max(minrank, 4), min(maxrank, 26)):
+                self._index(runners.BoundaryRunner(rank, analyzer))
 
     def index_by_rank(self, minrank, maxrank):
         """ Index all entries of placex in the given rank range (inclusive)
@@ -137,15 +142,16 @@ class Indexer:
         LOG.warning("Starting indexing rank (%i to %i) using %i threads",
                     minrank, maxrank, self.num_threads)
 
-        for rank in range(max(1, minrank), maxrank):
-            self._index(runners.RankRunner(rank))
+        with self.tokenizer.name_analyzer() as analyzer:
+            for rank in range(max(1, minrank), maxrank):
+                self._index(runners.RankRunner(rank, analyzer))
 
-        if maxrank == 30:
-            self._index(runners.RankRunner(0))
-            self._index(runners.InterpolationRunner(), 20)
-            self._index(runners.RankRunner(30), 20)
-        else:
-            self._index(runners.RankRunner(maxrank))
+            if maxrank == 30:
+                self._index(runners.RankRunner(0, analyzer))
+                self._index(runners.InterpolationRunner(analyzer), 20)
+                self._index(runners.RankRunner(30, analyzer), 20)
+            else:
+                self._index(runners.RankRunner(maxrank, analyzer))
 
 
     def index_postcodes(self):
@@ -173,6 +179,7 @@ class Indexer:
         LOG.warning("Starting %s (using batch size %s)", runner.name(), batch)
 
         with connect(self.dsn) as conn:
+            psycopg2.extras.register_hstore(conn)
             with conn.cursor() as cur:
                 total_tuples = cur.scalar(runner.sql_count_objects())
                 LOG.debug("Total number of rows: %i", total_tuples)
@@ -185,19 +192,24 @@ class Indexer:
                 with conn.cursor(name='places') as cur:
                     cur.execute(runner.sql_get_objects())
 
-                    with WorkerPool(self.dsn, self.num_threads) as pool:
-                        while True:
-                            places = [p[0] for p in cur.fetchmany(batch)]
-                            if not places:
-                                break
+                    with PlaceFetcher(self.dsn, conn) as fetcher:
+                        with WorkerPool(self.dsn, self.num_threads) as pool:
+                            has_more = fetcher.fetch_next_batch(cur, runner)
+                            while has_more:
+                                places = fetcher.get_batch()
 
-                            LOG.debug("Processing places: %s", str(places))
-                            worker = pool.next_free_worker()
+                                # asynchronously get the next batch
+                                has_more = fetcher.fetch_next_batch(cur, runner)
 
-                            worker.perform(runner.sql_index_place(places))
-                            progress.add(len(places))
+                                # And insert the curent batch
+                                for idx in range(0, len(places), batch):
+                                    part = places[idx:idx + batch]
+                                    LOG.debug("Processing places: %s", str(part))
+                                    runner.index_places(pool.next_free_worker(), part)
+                                    progress.add(len(part))
 
-                        pool.finish_all()
+                            LOG.info("Wait time: fetcher: %.2fs,  pool: %.2fs",
+                                     fetcher.wait_time, pool.wait_time)
 
                 conn.commit()
 

@@ -99,6 +99,27 @@ BEGIN
       DELETE FROM place where osm_type = NEW.osm_type and osm_id = NEW.osm_id and class = NEW.class;
     END IF;
 
+    -- Pure postcodes are never queried from placex so we don't add them.
+    -- location_postcodes is filled from the place table directly.
+    IF NEW.class = 'place' AND NEW.type = 'postcode' THEN
+      -- Remove old placex entry.
+      DELETE FROM placex where osm_type = NEW.osm_type and osm_id = NEW.osm_id;
+
+      IF existing.osm_type IS NOT NULL THEN
+        IF coalesce(existing.address, ''::hstore) != coalesce(NEW.address, ''::hstore)
+           OR existing.geometry::text != NEW.geometry::text
+        THEN
+
+          update place set address = NEW.address, geometry = NEW.geometry
+            where osm_type = NEW.osm_type and osm_id = NEW.osm_id and class = NEW.class and type = NEW.type;
+        END IF;
+
+        RETURN NULL;
+      END IF;
+
+      RETURN NEW;
+    END IF;
+
     {% if debug %}RAISE WARNING 'Existing: %',existing.osm_id;{% endif %}
     {% if debug %}RAISE WARNING 'Existing PlaceX: %',existingplacex.place_id;{% endif %}
 
@@ -201,7 +222,7 @@ BEGIN
         where osm_type = NEW.osm_type and osm_id = NEW.osm_id and class = NEW.class and type = NEW.type;
 
 
-      IF NEW.class in ('place','boundary') AND NEW.type in ('postcode','postal_code') THEN
+      IF NEW.class = 'boundary' AND NEW.type = 'postal_code' THEN
           IF NEW.address is NULL OR NOT NEW.address ? 'postcode' THEN
               -- postcode was deleted, no longer retain in placex
               DELETE FROM placex where place_id = existingplacex.place_id;

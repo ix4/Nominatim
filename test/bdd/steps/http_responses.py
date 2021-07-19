@@ -8,6 +8,10 @@ import xml.etree.ElementTree as ET
 
 from check_functions import Almost
 
+OSM_TYPE = {'N' : 'node', 'W' : 'way', 'R' : 'relation',
+            'n' : 'node', 'w' : 'way', 'r' : 'relation',
+            'node' : 'n', 'way' : 'w', 'relation' : 'r'}
+
 def _geojson_result_to_json_result(geojson_result):
     result = geojson_result['properties']
     result['geojson'] = geojson_result['geometry']
@@ -131,8 +135,15 @@ class GenericResponse:
                 if name == 'ID':
                     pass
                 elif name == 'osm':
-                    self.assert_field(i, 'osm_type', value[0])
+                    assert 'osm_type' in self.result[i], \
+                           "Result row {} has no field 'osm_type'.\nFull row: {}"\
+                               .format(i, json.dumps(self.result[i], indent=4))
+                    assert self.result[i]['osm_type'] in (OSM_TYPE[value[0]], value[0]), \
+                           BadRowValueAssert(self, i, 'osm_type', value)
                     self.assert_field(i, 'osm_id', value[1:])
+                elif name == 'osm_type':
+                    assert self.result[i]['osm_type'] in (OSM_TYPE[value[0]], value[0]), \
+                           BadRowValueAssert(self, i, 'osm_type', value)
                 elif name == 'centroid':
                     lon, lat = value.split(' ')
                     self.assert_field(i, 'lat', float(lat))

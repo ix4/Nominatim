@@ -3,7 +3,7 @@ Provides custom functions over command-line arguments.
 """
 
 
-class NominatimArgs: # pylint: disable=too-few-public-methods
+class NominatimArgs:
     """ Customized namespace class for the nominatim command line tool
         to receive the command-line arguments.
     """
@@ -24,4 +24,4 @@ class NominatimArgs: # pylint: disable=too-few-public-methods
                                      main_data=self.config.TABLESPACE_PLACE_DATA,
                                      main_index=self.config.TABLESPACE_PLACE_INDEX
                                     )
-                    )
+                   )

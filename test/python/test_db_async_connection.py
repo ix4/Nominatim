@@ -6,15 +6,14 @@ import concurrent.futures
 
 import pytest
 import psycopg2
-from psycopg2.extras import wait_select
 
 from nominatim.db.async_connection import DBConnection, DeadlockHandler
 
 
 @pytest.fixture
 def conn(temp_db):
-    with closing(DBConnection('dbname=' + temp_db)) as c:
-        yield c
+    with closing(DBConnection('dbname=' + temp_db)) as connection:
+        yield connection
 
 
 @pytest.fixture
@@ -56,13 +55,21 @@ def test_bad_query(conn):
         conn.wait()
 
 
+def test_bad_query_ignore(temp_db):
+    with closing(DBConnection('dbname=' + temp_db, ignore_sql_errors=True)) as conn:
+        conn.connect()
+
+        conn.perform('SELECT efasfjsea')
+
+        conn.wait()
+
+
 def exec_with_deadlock(cur, sql, detector):
     with DeadlockHandler(lambda *args: detector.append(1)):
         cur.execute(sql)
 
 
 def test_deadlock(simple_conns):
-    print(psycopg2.__version__)
     cur1, cur2 = simple_conns
 
     cur1.execute("""CREATE TABLE t1 (id INT PRIMARY KEY, t TEXT);
@@ -98,5 +105,3 @@ def test_deadlock(simple_conns):
         future.result()
 
         assert len(deadlock_check) == 1
-
-

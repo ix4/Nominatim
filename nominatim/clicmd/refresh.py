@@ -19,6 +19,8 @@ class UpdateRefresh:
 
     These functions must not be run in parallel with other update commands.
     """
+    def __init__(self):
+        self.tokenizer = None
 
     @staticmethod
     def add_args(parser):
@@ -43,13 +45,24 @@ class UpdateRefresh:
         group.add_argument('--enable-debug-statements', action='store_true',
                            help='Enable debug warning statements in functions')
 
-    @staticmethod
-    def run(args):
-        from ..tools import refresh
+
+    def run(self, args):
+        from ..tools import refresh, postcodes
+        from ..indexer.indexer import Indexer
+
 
         if args.postcodes:
-            LOG.warning("Update postcodes centroid")
-            refresh.update_postcodes(args.config.get_libpq_dsn(), args.sqllib_dir)
+            if postcodes.can_compute(args.config.get_libpq_dsn()):
+                LOG.warning("Update postcodes centroid")
+                tokenizer = self._get_tokenizer(args.config)
+                postcodes.update_postcodes(args.config.get_libpq_dsn(),
+                                           args.project_dir, tokenizer)
+                indexer = Indexer(args.config.get_libpq_dsn(), tokenizer,
+                                  args.threads or 1)
+                indexer.index_postcodes()
+            else:
+                LOG.error("The place table doesn't exist. "
+                          "Postcode updates on a frozen database is not possible.")
 
         if args.word_counts:
             LOG.warning('Recompute frequency of full-word search terms')
@@ -66,6 +79,7 @@ class UpdateRefresh:
             with connect(args.config.get_libpq_dsn()) as conn:
                 refresh.create_functions(conn, args.config,
                                          args.diffs, args.enable_debug_statements)
+                self._get_tokenizer(args.config).update_sql_functions(args.config)
 
         if args.wiki_data:
             data_path = Path(args.config.WIKIPEDIA_DATA_PATH
@@ -85,6 +99,16 @@ class UpdateRefresh:
         if args.website:
             webdir = args.project_dir / 'website'
             LOG.warning('Setting up website directory at %s', webdir)
-            refresh.setup_website(webdir, args.config)
+            with connect(args.config.get_libpq_dsn()) as conn:
+                refresh.setup_website(webdir, args.config, conn)
 
         return 0
+
+
+    def _get_tokenizer(self, config):
+        if self.tokenizer is None:
+            from ..tokenizer import factory as tokenizer_factory
+
+            self.tokenizer = tokenizer_factory.get_tokenizer_for_db(config)
+
+        return self.tokenizer

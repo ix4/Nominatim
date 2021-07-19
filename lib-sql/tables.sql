@@ -43,22 +43,6 @@ CREATE TABLE nominatim_properties (
 );
 GRANT SELECT ON TABLE nominatim_properties TO "{{config.DATABASE_WEBUSER}}";
 
-drop table IF EXISTS word;
-CREATE TABLE word (
-  word_id INTEGER,
-  word_token text,
-  word text,
-  class text,
-  type text,
-  country_code varchar(2),
-  search_name_count INTEGER,
-  operator TEXT
-  ) {{db.tablespace.search_data}};
-CREATE INDEX idx_word_word_token on word USING BTREE (word_token) {{db.tablespace.search_index}};
-GRANT SELECT ON word TO "{{config.DATABASE_WEBUSER}}" ;
-DROP SEQUENCE IF EXISTS seq_word;
-CREATE SEQUENCE seq_word start 1;
-
 drop table IF EXISTS location_area CASCADE;
 CREATE TABLE location_area (
   place_id BIGINT,
@@ -83,22 +67,6 @@ CREATE TABLE location_area_country (
   ) {{db.tablespace.address_data}};
 CREATE INDEX idx_location_area_country_geometry ON location_area_country USING GIST (geometry) {{db.tablespace.address_index}};
 
-
-drop table IF EXISTS location_property CASCADE;
-CREATE TABLE location_property (
-  place_id BIGINT,
-  parent_place_id BIGINT,
-  partition SMALLINT,
-  housenumber TEXT,
-  postcode TEXT,
-  centroid GEOMETRY(Point, 4326)
-  );
-
-CREATE TABLE location_property_aux () INHERITS (location_property);
-CREATE INDEX idx_location_property_aux_place_id ON location_property_aux USING BTREE (place_id);
-CREATE INDEX idx_location_property_aux_parent_place_id ON location_property_aux USING BTREE (parent_place_id);
-CREATE INDEX idx_location_property_aux_housenumber_parent_place_id ON location_property_aux USING BTREE (parent_place_id, housenumber);
-GRANT SELECT ON location_property_aux TO "{{config.DATABASE_WEBUSER}}";
 
 CREATE TABLE location_property_tiger (
   place_id BIGINT,
@@ -125,6 +93,7 @@ CREATE TABLE location_property_osmline (
     linegeo GEOMETRY,
     interpolationtype TEXT,
     address HSTORE,
+    token_info JSONB, -- custom column for tokenizer use only
     postcode TEXT,
     country_code VARCHAR(2)
   ){{db.tablespace.search_data}};
@@ -174,6 +143,7 @@ CREATE TABLE placex (
   indexed_status SMALLINT,
   LIKE place INCLUDING CONSTRAINTS,
   wikipedia TEXT, -- calculated wikipedia article name (language:title)
+  token_info JSONB, -- custom column for tokenizer use only
   country_code varchar(2),
   housenumber TEXT,
   postcode TEXT,
@@ -184,6 +154,10 @@ CREATE INDEX idx_placex_osmid ON placex USING BTREE (osm_type, osm_id) {{db.tabl
 CREATE INDEX idx_placex_linked_place_id ON placex USING BTREE (linked_place_id) {{db.tablespace.address_index}} WHERE linked_place_id IS NOT NULL;
 CREATE INDEX idx_placex_rank_search ON placex USING BTREE (rank_search, geometry_sector) {{db.tablespace.address_index}};
 CREATE INDEX idx_placex_geometry ON placex USING GIST (geometry) {{db.tablespace.search_index}};
+CREATE INDEX idx_placex_geometry_buildings ON placex
+  USING GIST (geometry) {{db.tablespace.search_index}}
+  WHERE address is not null and rank_search = 30
+        and ST_GeometryType(geometry) in ('ST_Polygon','ST_MultiPolygon');
 CREATE INDEX idx_placex_geometry_placenode ON placex
   USING GIST (geometry) {{db.tablespace.search_index}}
   WHERE osm_type = 'N' and rank_search < 26
@@ -194,7 +168,6 @@ DROP SEQUENCE IF EXISTS seq_place;
 CREATE SEQUENCE seq_place start 1;
 GRANT SELECT on placex to "{{config.DATABASE_WEBUSER}}" ;
 GRANT SELECT on place_addressline to "{{config.DATABASE_WEBUSER}}" ;
-GRANT SELECT ON seq_word to "{{config.DATABASE_WEBUSER}}" ;
 GRANT SELECT ON planet_osm_ways to "{{config.DATABASE_WEBUSER}}" ;
 GRANT SELECT ON planet_osm_rels to "{{config.DATABASE_WEBUSER}}" ;
 GRANT SELECT on location_area to "{{config.DATABASE_WEBUSER}}" ;

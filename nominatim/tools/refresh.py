@@ -5,19 +5,13 @@ import json
 import logging
 from textwrap import dedent
 
-from psycopg2.extras import execute_values
+from psycopg2 import sql as pysql
 
 from nominatim.db.utils import execute_file
 from nominatim.db.sql_preprocessor import SQLPreprocessor
 from nominatim.version import NOMINATIM_VERSION
 
 LOG = logging.getLogger()
-
-def update_postcodes(dsn, sql_dir):
-    """ Recalculate postcode centroids and add, remove and update entries in the
-        location_postcode table. `conn` is an opne connection to the database.
-    """
-    execute_file(dsn, sql_dir / 'update-postcodes.sql')
 
 
 def recompute_word_counts(dsn, sql_dir):
@@ -55,7 +49,7 @@ def load_address_levels(conn, table, levels):
         _add_address_level_rows_from_entry(rows, entry)
 
     with conn.cursor() as cur:
-        cur.execute('DROP TABLE IF EXISTS {}'.format(table))
+        cur.drop_table(table)
 
         cur.execute("""CREATE TABLE {} (country_code varchar(2),
                                         class TEXT,
@@ -63,7 +57,8 @@ def load_address_levels(conn, table, levels):
                                         rank_search SMALLINT,
                                         rank_address SMALLINT)""".format(table))
 
-        execute_values(cur, "INSERT INTO {} VALUES %s".format(table), rows)
+        cur.execute_values(pysql.SQL("INSERT INTO {} VALUES %s")
+                           .format(pysql.Identifier(table)), rows)
 
         cur.execute('CREATE UNIQUE INDEX ON {} (country_code, class, type)'.format(table))
 
@@ -104,14 +99,11 @@ PHP_CONST_DEFS = (
     ('Default_Language', 'DEFAULT_LANGUAGE', str),
     ('Log_DB', 'LOG_DB', bool),
     ('Log_File', 'LOG_FILE', str),
-    ('Max_Word_Frequency', 'MAX_WORD_FREQUENCY', int),
     ('NoAccessControl', 'CORS_NOACCESSCONTROL', bool),
     ('Places_Max_ID_count', 'LOOKUP_MAX_COUNT', int),
     ('PolygonOutput_MaximumTypes', 'POLYGON_OUTPUT_MAX_TYPES', int),
     ('Search_BatchMode', 'SEARCH_BATCH_MODE', bool),
     ('Search_NameOnlySearchFrequencyThreshold', 'SEARCH_NAME_ONLY_THRESHOLD', str),
-    ('Term_Normalization_Rules', 'TERM_NORMALIZATION', str),
-    ('Use_Aux_Location_data', 'USE_AUX_LOCATION_DATA', bool),
     ('Use_US_Tiger_Data', 'USE_US_TIGER_DATA', bool),
     ('MapIcon_URL', 'MAPICON_URL', str),
 )
@@ -164,7 +156,21 @@ def recompute_importance(conn):
     conn.commit()
 
 
-def setup_website(basedir, config):
+def _quote_php_variable(var_type, config, conf_name):
+    if var_type == bool:
+        return 'true' if config.get_bool(conf_name) else 'false'
+
+    if var_type == int:
+        return getattr(config, conf_name)
+
+    if not getattr(config, conf_name):
+        return 'false'
+
+    quoted = getattr(config, conf_name).replace("'", "\\'")
+    return f"'{quoted}'"
+
+
+def setup_website(basedir, config, conn):
     """ Create the website script stubs.
     """
     if not basedir.exists():
@@ -176,23 +182,23 @@ def setup_website(basedir, config):
 
                       @define('CONST_Debug', $_GET['debug'] ?? false);
                       @define('CONST_LibDir', '{0}');
+                      @define('CONST_TokenizerDir', '{2}');
                       @define('CONST_NominatimVersion', '{1[0]}.{1[1]}.{1[2]}-{1[3]}');
 
-                      """.format(config.lib_dir.php, NOMINATIM_VERSION))
+                      """.format(config.lib_dir.php, NOMINATIM_VERSION,
+                                 config.project_dir / 'tokenizer'))
 
     for php_name, conf_name, var_type in PHP_CONST_DEFS:
-        if var_type == bool:
-            varout = 'true' if config.get_bool(conf_name) else 'false'
-        elif var_type == int:
-            varout = getattr(config, conf_name)
-        elif not getattr(config, conf_name):
-            varout = 'false'
-        else:
-            varout = "'{}'".format(getattr(config, conf_name).replace("'", "\\'"))
+        varout = _quote_php_variable(var_type, config, conf_name)
 
-        template += "@define('CONST_{}', {});\n".format(php_name, varout)
+        template += f"@define('CONST_{php_name}', {varout});\n"
 
-    template += "\nrequire_once('{}/website/{{}}');\n".format(config.lib_dir.php)
+    template += f"\nrequire_once('{config.lib_dir.php}/website/{{}}');\n"
+
+    search_name_table_exists = bool(conn and conn.table_exists('search_name'))
 
     for script in WEBSITE_SCRIPTS:
-        (basedir / script).write_text(template.format(script), 'utf-8')
+        if not search_name_table_exists and script == 'search.php':
+            (basedir / script).write_text(template.format('reverse-only-search.php'), 'utf-8')
+        else:
+            (basedir / script).write_text(template.format(script), 'utf-8')

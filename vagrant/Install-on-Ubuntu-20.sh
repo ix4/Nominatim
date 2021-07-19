@@ -33,7 +33,8 @@ export DEBIAN_FRONTEND=noninteractive #DOCS:
                         postgresql-server-dev-12 postgresql-12-postgis-3 \
                         postgresql-contrib-12 postgresql-12-postgis-3-scripts \
                         php php-pgsql php-intl libicu-dev python3-dotenv \
-                        python3-psycopg2 python3-psutil python3-jinja2 python3-icu git
+                        python3-psycopg2 python3-psutil python3-jinja2 \
+                        python3-icu python3-datrie git
 
 #
 # System Configuration
@@ -244,6 +245,9 @@ server {
 EOF_NGINX_CONF
 #DOCS:```
 
+# If you have some errors, make sure that php7.4-fpm.sock is well under
+# /var/run/ and not under /var/run/php. Otherwise change the Nginx configuration
+# to /var/run/php/php7.4-fpm.sock.
 #
 # Enable the configuration and restart Nginx
 #

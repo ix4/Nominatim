@@ -18,16 +18,16 @@ def run_legacy_script(script, *args, nominatim_env=None, throw_on_fail=False):
         then throw a `CalledProcessError` on a non-zero exit.
     """
     cmd = ['/usr/bin/env', 'php', '-Cq',
-           nominatim_env.phplib_dir / 'admin' / script]
+           str(nominatim_env.phplib_dir / 'admin' / script)]
     cmd.extend([str(a) for a in args])
 
     env = nominatim_env.config.get_os_env()
     env['NOMINATIM_DATADIR'] = str(nominatim_env.data_dir)
     env['NOMINATIM_SQLDIR'] = str(nominatim_env.sqllib_dir)
     env['NOMINATIM_CONFIGDIR'] = str(nominatim_env.config_dir)
-    env['NOMINATIM_DATABASE_MODULE_SRC_PATH'] = nominatim_env.module_dir
+    env['NOMINATIM_DATABASE_MODULE_SRC_PATH'] = str(nominatim_env.module_dir)
     if not env['NOMINATIM_OSM2PGSQL_BINARY']:
-        env['NOMINATIM_OSM2PGSQL_BINARY'] = nominatim_env.osm2pgsql_path
+        env['NOMINATIM_OSM2PGSQL_BINARY'] = str(nominatim_env.osm2pgsql_path)
 
     proc = subprocess.run(cmd, cwd=str(nominatim_env.project_dir), env=env,
                           check=throw_on_fail)
@@ -70,7 +70,9 @@ def run_api_script(endpoint, project_dir, extra_env=None, phpcgi_bin=None,
     else:
         cmd = [str(phpcgi_bin)]
 
-    proc = subprocess.run(cmd, cwd=str(project_dir), env=env, capture_output=True,
+    proc = subprocess.run(cmd, cwd=str(project_dir), env=env,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,
                           check=False)
 
     if proc.returncode != 0 or proc.stderr:
@@ -134,11 +136,11 @@ def run_osm2pgsql(options):
 def get_url(url):
     """ Get the contents from the given URL and return it as a UTF-8 string.
     """
-    headers = {"User-Agent" : "Nominatim/{0[0]}.{0[1]}.{0[2]}-{0[3]}".format(NOMINATIM_VERSION)}
+    headers = {"User-Agent": "Nominatim/{0[0]}.{0[1]}.{0[2]}-{0[3]}".format(NOMINATIM_VERSION)}
 
     try:
         with urlrequest.urlopen(urlrequest.Request(url, headers=headers)) as response:
             return response.read().decode('utf-8')
-    except:
+    except Exception:
         LOG.fatal('Failed to load URL: %s', url)
         raise

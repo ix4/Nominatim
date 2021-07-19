@@ -13,8 +13,7 @@ class Result
     const TABLE_PLACEX = 0;
     const TABLE_POSTCODE = 1;
     const TABLE_OSMLINE = 2;
-    const TABLE_AUX = 3;
-    const TABLE_TIGER = 4;
+    const TABLE_TIGER = 3;
 
     /// Database table that contains the result.
     public $iTable;
@@ -56,6 +55,27 @@ class Result
             }
         )));
     }
+
+    public static function joinIdsByTableMinRank($aResults, $iTable, $iMinAddressRank)
+    {
+        return join(',', array_keys(array_filter(
+            $aResults,
+            function ($aValue) use ($iTable, $iMinAddressRank) {
+                return $aValue->iTable == $iTable && $aValue->iAddressRank >= $iMinAddressRank;
+            }
+        )));
+    }
+
+    public static function joinIdsByTableMaxRank($aResults, $iTable, $iMaxAddressRank)
+    {
+        return join(',', array_keys(array_filter(
+            $aResults,
+            function ($aValue) use ($iTable, $iMaxAddressRank) {
+                return $aValue->iTable == $iTable && $aValue->iAddressRank <= $iMaxAddressRank;
+            }
+        )));
+    }
+
     public static function sqlHouseNumberTable($aResults, $iTable)
     {
         $sHousenumbers = '';

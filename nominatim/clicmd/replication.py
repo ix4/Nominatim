@@ -83,6 +83,7 @@ class UpdateReplication:
     def _update(args):
         from ..tools import replication
         from ..indexer.indexer import Indexer
+        from ..tokenizer import factory as tokenizer_factory
 
         params = args.osm2pgsql_options(default_cache=2000, default_threads=1)
         params.update(base_url=args.config.REPLICATION_URL,
@@ -92,7 +93,7 @@ class UpdateReplication:
                       indexed_only=not args.once)
 
         # Sanity check to not overwhelm the Geofabrik servers.
-        if 'download.geofabrik.de'in params['base_url']\
+        if 'download.geofabrik.de' in params['base_url']\
            and params['update_interval'] < 86400:
             LOG.fatal("Update interval too low for download.geofabrik.de.\n"
                       "Please check install documentation "
@@ -106,6 +107,8 @@ class UpdateReplication:
                 raise UsageError("Bad argument '--no-index'.")
             recheck_interval = args.config.get_int('REPLICATION_RECHECK_INTERVAL')
 
+        tokenizer = tokenizer_factory.get_tokenizer_for_db(args.config)
+
         while True:
             with connect(args.config.get_libpq_dsn()) as conn:
                 start = dt.datetime.now(dt.timezone.utc)
@@ -113,10 +116,11 @@ class UpdateReplication:
                 if state is not replication.UpdateState.NO_CHANGES:
                     status.log_status(conn, start, 'import')
                 batchdate, _, _ = status.get_status(conn)
+                conn.commit()
 
             if state is not replication.UpdateState.NO_CHANGES and args.do_index:
                 index_start = dt.datetime.now(dt.timezone.utc)
-                indexer = Indexer(args.config.get_libpq_dsn(),
+                indexer = Indexer(args.config.get_libpq_dsn(), tokenizer,
                                   args.threads or 1)
                 indexer.index_boundaries(0, 30)
                 indexer.index_by_rank(0, 30)
@@ -124,6 +128,7 @@ class UpdateReplication:
                 with connect(args.config.get_libpq_dsn()) as conn:
                     status.set_indexed(conn, True)
                     status.log_status(conn, index_start, 'index')
+                    conn.commit()
             else:
                 index_start = None
 

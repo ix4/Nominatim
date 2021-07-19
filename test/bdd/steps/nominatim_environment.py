@@ -9,7 +9,9 @@ sys.path.insert(1, str((Path(__file__) / '..' / '..' / '..' / '..').resolve()))
 
 from nominatim import cli
 from nominatim.config import Configuration
+from nominatim.db.connection import _Connection
 from nominatim.tools import refresh
+from nominatim.tokenizer import factory as tokenizer_factory
 from steps.utils import run_script
 
 class NominatimEnvironment:
@@ -27,6 +29,7 @@ class NominatimEnvironment:
         self.test_db = config['TEST_DB']
         self.api_test_db = config['API_TEST_DB']
         self.api_test_file = config['API_TEST_FILE']
+        self.tokenizer = config['TOKENIZER']
         self.server_module_path = config['SERVER_MODULE_PATH']
         self.reuse_template = not config['REMOVE_TEMPLATE']
         self.keep_scenario_db = config['KEEP_TEST_DB']
@@ -52,7 +55,7 @@ class NominatimEnvironment:
             dbargs['user'] = self.db_user
         if self.db_pass:
             dbargs['password'] = self.db_pass
-        conn = psycopg2.connect(**dbargs)
+        conn = psycopg2.connect(connection_factory=_Connection, **dbargs)
         return conn
 
     def next_code_coverage_file(self):
@@ -95,6 +98,8 @@ class NominatimEnvironment:
         self.test_env['NOMINATIM_DATABASE_MODULE_SRC_PATH'] = str((self.build_dir / 'module').resolve())
         self.test_env['NOMINATIM_OSM2PGSQL_BINARY'] = str((self.build_dir / 'osm2pgsql' / 'osm2pgsql').resolve())
         self.test_env['NOMINATIM_NOMINATIM_TOOL'] = str((self.build_dir / 'nominatim').resolve())
+        if self.tokenizer is not None:
+            self.test_env['NOMINATIM_TOKENIZER'] = self.tokenizer
 
         if self.server_module_path:
             self.test_env['NOMINATIM_DATABASE_MODULE_PATH'] = self.server_module_path
@@ -106,9 +111,24 @@ class NominatimEnvironment:
             self.website_dir.cleanup()
 
         self.website_dir = tempfile.TemporaryDirectory()
-        cfg = Configuration(None, self.src_dir / 'settings', environ=self.test_env)
-        cfg.lib_dir.php = self.src_dir / 'lib-php'
-        refresh.setup_website(Path(self.website_dir.name) / 'website', cfg)
+
+        try:
+            conn = self.connect_database(dbname)
+        except:
+            conn = False
+        refresh.setup_website(Path(self.website_dir.name) / 'website',
+                              self.get_test_config(), conn)
+
+
+    def get_test_config(self):
+        cfg = Configuration(Path(self.website_dir.name), self.src_dir / 'settings',
+                            environ=self.test_env)
+        cfg.set_libdirs(module=self.build_dir / 'module',
+                        osm2pgsql=self.build_dir / 'osm2pgsql' / 'osm2pgsql',
+                        php=self.src_dir / 'lib-php',
+                        sql=self.src_dir / 'lib-sql',
+                        data=self.src_dir / 'data')
+        return cfg
 
     def get_libpq_dsn(self):
         dsn = self.test_env['NOMINATIM_DATABASE_DSN']
@@ -169,56 +189,68 @@ class NominatimEnvironment:
         """
         self.write_nominatim_config(self.api_test_db)
 
-        if self.api_db_done:
-            return
+        if not self.api_db_done:
+            self.api_db_done = True
 
-        self.api_db_done = True
+            if not self._reuse_or_drop_db(self.api_test_db):
+                testdata = Path('__file__') / '..' / '..' / 'testdb'
+                self.test_env['NOMINATIM_WIKIPEDIA_DATA_PATH'] = str(testdata.resolve())
 
-        if self._reuse_or_drop_db(self.api_test_db):
-            return
+                try:
+                    self.run_nominatim('import', '--osm-file', str(self.api_test_file))
+                    self.run_nominatim('add-data', '--tiger-data', str((testdata / 'tiger').resolve()))
+                    self.run_nominatim('freeze')
 
-        testdata = Path('__file__') / '..' / '..' / 'testdb'
-        self.test_env['NOMINATIM_WIKIPEDIA_DATA_PATH'] = str(testdata.resolve())
+                    if self.tokenizer != 'legacy_icu':
+                        phrase_file = str((testdata / 'specialphrases_testdb.sql').resolve())
+                        run_script(['psql', '-d', self.api_test_db, '-f', phrase_file])
+                    else:
+                        csv_path = str((testdata / 'full_en_phrases_test.csv').resolve())
+                        self.run_nominatim('special-phrases', '--import-from-csv', csv_path)
+                except:
+                    self.db_drop_database(self.api_test_db)
+                    raise
 
-        try:
-            self.run_nominatim('import', '--osm-file', str(self.api_test_file))
-            self.run_nominatim('add-data', '--tiger-data', str((testdata / 'tiger').resolve()))
-            self.run_nominatim('freeze')
-
-            phrase_file = str((testdata / 'specialphrases_testdb.sql').resolve())
-            run_script(['psql', '-d', self.api_test_db, '-f', phrase_file])
-        except:
-            self.db_drop_database(self.api_test_db)
-            raise
+        tokenizer_factory.create_tokenizer(self.get_test_config(), init_db=False)
 
 
     def setup_unknown_db(self):
         """ Setup a test against a non-existing database.
         """
-        self.write_nominatim_config('UNKNOWN_DATABASE_NAME')
+        # The tokenizer needs an existing database to function.
+        # So start with the usual database
+        class _Context:
+            db = None
+
+        context = _Context()
+        self.setup_db(context)
+        tokenizer_factory.create_tokenizer(self.get_test_config(), init_db=False)
+
+        # Then drop the DB again
+        self.teardown_db(context, force_drop=True)
 
     def setup_db(self, context):
         """ Setup a test against a fresh, empty test database.
         """
         self.setup_template_db()
-        self.write_nominatim_config(self.test_db)
         conn = self.connect_database(self.template_db)
         conn.set_isolation_level(0)
         cur = conn.cursor()
         cur.execute('DROP DATABASE IF EXISTS {}'.format(self.test_db))
         cur.execute('CREATE DATABASE {} TEMPLATE = {}'.format(self.test_db, self.template_db))
         conn.close()
+        self.write_nominatim_config(self.test_db)
         context.db = self.connect_database(self.test_db)
         context.db.autocommit = True
         psycopg2.extras.register_hstore(context.db, globally=False)
 
-    def teardown_db(self, context):
+    def teardown_db(self, context, force_drop=False):
         """ Remove the test database, if it exists.
         """
-        if 'db' in context:
+        if hasattr(context, 'db'):
             context.db.close()
 
-        if not self.keep_scenario_db:
+        if force_drop or not self.keep_scenario_db:
             self.db_drop_database(self.test_db)
 
     def _reuse_or_drop_db(self, name):

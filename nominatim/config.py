@@ -39,7 +39,7 @@ class Configuration:
             self._config['NOMINATIM_ADDRESS_LEVEL_CONFIG'] = \
                 str(config_dir / 'address-levels.json')
 
-        class _LibDirs: # pylint: disable=too-few-public-methods
+        class _LibDirs:
             pass
 
         self.lib_dir = _LibDirs()
@@ -68,9 +68,9 @@ class Configuration:
         """
         try:
             return int(self.__getattr__(name))
-        except ValueError:
+        except ValueError as exp:
             LOG.fatal("Invalid setting NOMINATIM_%s. Needs to be a number.", name)
-            raise UsageError("Configuration error.")
+            raise UsageError("Configuration error.") from exp
 
 
     def get_libpq_dsn(self):
